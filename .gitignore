@@ -1,0 +1,6 @@
+bin/
+obj/
+*.user
+artifacts/
+release/
+__pycache__/

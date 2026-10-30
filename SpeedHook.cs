@@ -6,12 +6,6 @@ namespace MiniSpeed;
 
 internal static class SpeedHook
 {
-    [DllImport("MinHook.x64", CallingConvention = CallingConvention.Winapi)]
-    private static extern int MH_Initialize();
-    [DllImport("MinHook.x64", CallingConvention = CallingConvention.Winapi)]
-    private static extern int MH_CreateHook(nint target, nint detour, out nint original);
-    [DllImport("MinHook.x64", CallingConvention = CallingConvention.Winapi)]
-    private static extern int MH_EnableHook(nint target);
     [DllImport("user32")]
     private static extern short GetAsyncKeyState(int key);
     [DllImport("user32")]
@@ -55,16 +49,10 @@ internal static class SpeedHook
         fieldValue = NativeApi.Export<NativeApi.FieldValue>("il2cpp_field_get_value");
         var target = Marshal.ReadIntPtr(getter);
         if (target == IntPtr.Zero) throw new InvalidOperationException("Speed getter has no native address.");
-        Check(MH_Initialize(), "initialize MinHook");
-        Check(MH_CreateHook(target, Marshal.GetFunctionPointerForDelegate(Detour), out var trampoline), "create speed hook");
+        var trampoline = NativeHooks.Create(target, Marshal.GetFunctionPointerForDelegate(Detour));
         original = Marshal.GetDelegateForFunctionPointer<SpeedGetter>(trampoline);
-        Check(MH_EnableHook(target), "enable speed hook");
+        NativeHooks.Enable(target);
         Entrypoint.Log("PlayerProp.get_Speed hook installed. Waiting for the local hero. F6 toggles; F7 reloads MiniSpeed.cfg.");
-    }
-
-    private static void Check(int status, string operation)
-    {
-        if (status != 0) throw new InvalidOperationException($"Cannot {operation}: MinHook status {status}");
     }
 
     private static int GetSpeed(nint instance, nint method)

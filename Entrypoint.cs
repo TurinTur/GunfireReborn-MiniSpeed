@@ -24,8 +24,9 @@ public static class Entrypoint
     {
         try
         {
-            Log("MiniSpeed 0.1.0 starting.");
+            Log("MiniSpeed 0.2.0 starting.");
             Settings.Reload();
+            new Thread(UpgradeHook.Initialize) { IsBackground = true, Name = "MiniSpeed upgrade hook" }.Start();
             while (NativeApi.GetModuleHandle("GameAssembly.dll") == 0) Thread.Sleep(100);
             var domainGet = NativeApi.Export<NativeApi.NoArgs>("il2cpp_domain_get");
             var assemblies = NativeApi.Export<NativeApi.Assemblies>("il2cpp_domain_get_assemblies");

@@ -8,4 +8,7 @@
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <CheckEolTargetFramework>false</CheckEolTargetFramework>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
 </Project>

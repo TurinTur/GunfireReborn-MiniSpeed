@@ -1,7 +1,7 @@
 # MiniSpeed — Gunfire Reborn
 
-A configurable local-player movement-speed and weapon-upgrade pricing mod.
-Defaults: **1.5× movement speed** and progressively increasing Craftsman prices.
+A configurable local-player base movement-speed and weapon-upgrade pricing mod.
+Defaults: **1.5× character base movement speed** and progressively increasing Craftsman prices.
 
 ## Download and install
 
@@ -16,8 +16,8 @@ It targets Windows x64 Steam installations. If another mod loader is installed,
 back up its `winhttp.dll` and `doorstop_config.ini` before replacing them.
 See the bundled `INSTALL.txt` for configuration and removal instructions.
 
-**Status:** experimental. Build and hook installation verified; physical movement
-and gameplay interactions still require an in-game play test.
+**Status (0.3.0):** character base-speed modification confirmed working in-game
+with Momo. Multiplayer and special modifier interactions remain unverified.
 
 ## Weapon upgrade prices (0.2.0)
 
@@ -70,7 +70,7 @@ host/client behavior is unverified; test in solo first.
 The private runtime layout is specific to the tested gameplay DLL. Its SHA-256
 must match `F30326B86CFF21AECF58D7D1F6CE4593122DC49E7F3139DEA65F76E1F222698E`.
 On a mismatch the upgrade feature logs an unsupported-version message and stays
-disabled; movement can still load.
+disabled along with base-speed modification.
 
 **Verified:** the actual Python call path returns the requested prices for
 levels 0–10, 35, and 100. A startup self-check exercises it without changing
@@ -79,15 +79,21 @@ displayed price, copper deduction, and behavior with special modifiers.
 
 ## Current implementation
 
-Loads through Unity Doorstop with .NET 6 and uses MinHook 1.3.4 to intercept
-`PlayerProp.get_Speed`. It identifies the local player's property object through
-`CharacterMotionManager.HeroObj.playerProp`, and multiplies only that object's
-returned speed. The underlying stat is never overwritten, so the multiplier does
-not accumulate and disabling the mod immediately returns the original value.
+Loads through Unity Doorstop with .NET 6. The shared embedded-Python evaluator
+intercepts `cl_object.baseattr.CMoveSpeed.ChangeBase` for `CCtrlHero`, modifying
+the base-speed input before the game calculates additive and percentage bonuses,
+weapon penalties, and other effects. Other scene objects retain their speed.
+For Momo (hero SID 219), the observed base input is `550` = **5.5 movement units**;
+a multiplier of `1.2` changes that base to `660` = **6.6**.
 
-This is a **reported movement-speed multiplier**, not a verified modification of
-the hero's base stat before every other modifier. Weapon penalties, bonuses,
-dash behavior, and scene transitions need in-game verification.
+The original base is retained per movement attribute. Later game base changes
+replace that original rather than compounding the mod's multiplier. F6/F7 also
+update/restore the stored base when the game next refreshes that movement
+attribute. Changes can wait until a scene transition or a speed bonus change.
+Callable base formulas are left to the game.
+
+The earlier final-speed getter multiplier and its verbose Unity speed observer
+have been removed. Movement changes now use the gameplay base attribute only.
 
 The installed build uses Unity 2018.4.36f1 and nonstandard IL2CPP metadata files.
 Standard BepInEx interop generation failed, so this mod uses the runtime API
@@ -98,9 +104,11 @@ directly. BepInEx plugins are not loaded while Doorstop targets MiniSpeed.
 - **F6:** toggle the multiplier for the current session.
 - **F7:** reload `MiniSpeed.cfg`.
 
-Controls are checked while the local hero's speed is being queried and the game
-has focus. Hold a key briefly if necessary. Toggle/reload events appear in
-`MiniSpeed.log`; there is no in-game notification.
+Controls are checked independently of speed queries while the game has focus.
+`MiniSpeed.log` records each F6/F7 press, the resulting base-speed settings,
+and the original/modified base when applied. Each key press explains that
+application may be delayed until the game's next movement attribute refresh.
+There is no in-game notification.
 
 ## Configuration
 
@@ -151,10 +159,11 @@ Official dependencies:
 
 ## Verification
 
-1. Launch from Steam. `MiniSpeed.log` should report `hook installed`.
-2. Enter a solo run. The log should report `Local hero speed hook active` with
-   the original and modified values.
-3. Walk along a repeatable route; compare with F6 enabled and disabled.
+1. Launch from Steam. `MiniSpeed.log` should report `Character base-speed hook installed`.
+2. Enter a solo run. Look for `Hero base speed applied` with the original and
+   modified base.
+3. Walk along a repeatable route; compare with F6 enabled and disabled after
+   the log confirms the new base has been applied.
 4. Check weapon switching, scroll speed bonuses, dashing, and a level transition.
 5. Test `SpeedMultiplier = 1.0` and reload with F7 for an unmodified comparison.
 

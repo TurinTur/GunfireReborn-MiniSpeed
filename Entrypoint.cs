@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using MiniSpeed;
 
 namespace Doorstop;
@@ -24,39 +23,11 @@ public static class Entrypoint
     {
         try
         {
-            Log("MiniSpeed 0.2.0 starting.");
+            Log("MiniSpeed 0.3.0 starting (character base-speed build).");
             Settings.Reload();
-            new Thread(UpgradeHook.Initialize) { IsBackground = true, Name = "MiniSpeed upgrade hook" }.Start();
-            while (NativeApi.GetModuleHandle("GameAssembly.dll") == 0) Thread.Sleep(100);
-            var domainGet = NativeApi.Export<NativeApi.NoArgs>("il2cpp_domain_get");
-            var assemblies = NativeApi.Export<NativeApi.Assemblies>("il2cpp_domain_get_assemblies");
-            nint domain, list;
-            do
-            {
-                Thread.Sleep(250);
-                domain = domainGet();
-                list = domain == 0 ? 0 : assemblies(domain, out _);
-            } while (list == 0);
-            var thread = NativeApi.Export<NativeApi.OnePtr>("il2cpp_thread_attach")(domain);
-            try
-            {
-                list = assemblies(domain, out var count);
-                var imageGet = NativeApi.Export<NativeApi.OnePtr>("il2cpp_assembly_get_image");
-                var imageName = NativeApi.Export<NativeApi.OnePtr>("il2cpp_image_get_name");
-                for (int i = 0; i < (int)count; i++)
-                {
-                    var image = imageGet(Marshal.ReadIntPtr(list, i * IntPtr.Size));
-                    if (NativeApi.Text(imageName(image)) != "Assembly-CSharp.dll") continue;
-                    SpeedHook.Install(image);
-                    return;
-                }
-                throw new InvalidOperationException("Assembly-CSharp.dll not found.");
-            }
-            finally { NativeApi.Export<Detach>("il2cpp_thread_detach")(thread); }
+            SpeedHook.StartKeyMonitor();
+            UpgradeHook.Initialize();
         }
         catch (Exception ex) { Log($"Initialization failed: {ex}"); }
     }
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void Detach(nint thread);
 }

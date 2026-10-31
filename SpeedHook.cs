@@ -1,4 +1,4 @@
-using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using Doorstop;
 
@@ -13,90 +13,54 @@ internal static class SpeedHook
     [DllImport("user32")]
     private static extern uint GetWindowThreadProcessId(nint window, out uint processId);
 
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate int SpeedGetter(nint instance, nint method);
-
-    // Keep both delegates rooted for the entire process lifetime.
-    private static readonly SpeedGetter Detour = GetSpeed;
-    private static SpeedGetter original = null!;
-    private static NativeApi.StaticValue staticValue = null!;
-    private static NativeApi.FieldValue fieldValue = null!;
-    private static nint heroField, propField;
-    private static bool toggleHeld, reloadHeld, reportedError;
-    private static nint lastProp;
-    private static long nextKeyCheck;
+    internal static readonly object SpeedLock = new();
+    private static bool toggleHeld, reloadHeld;
     private static readonly uint ProcessId = (uint)Environment.ProcessId;
 
-    internal static void Install(nint image)
-    {
-        var klass = NativeApi.Export<NativeApi.ClassFromName>("il2cpp_class_from_name");
-        var field = NativeApi.Export<NativeApi.NamedMember>("il2cpp_class_get_field_from_name");
-        var method = NativeApi.Export<NativeApi.Method>("il2cpp_class_get_method_from_name");
-        var prop = klass(image, "", "PlayerProp");
-        var motion = klass(image, "", "CharacterMotionManager");
-        var player = klass(image, "", "NewPlayerObject");
-        if (prop == 0 || motion == 0 || player == 0)
-            throw new InvalidOperationException("Required player classes are missing in this game version.");
-        heroField = field(motion, "HeroObj");
-        propField = field(player, "playerProp");
-        var getter = method(prop, "get_Speed", 0);
-        if (heroField == 0 || propField == 0 || getter == 0)
-            throw new InvalidOperationException("Required player fields or speed getter are missing.");
-        var returnType = NativeApi.Export<NativeApi.OnePtr>("il2cpp_method_get_return_type")(getter);
-        var typeName = NativeApi.Text(NativeApi.Export<NativeApi.OnePtr>("il2cpp_type_get_name")(returnType));
-        if (typeName != "System.Int32") throw new InvalidOperationException($"Unsupported speed type: {typeName}");
-        staticValue = NativeApi.Export<NativeApi.StaticValue>("il2cpp_field_static_get_value");
-        fieldValue = NativeApi.Export<NativeApi.FieldValue>("il2cpp_field_get_value");
-        var target = Marshal.ReadIntPtr(getter);
-        if (target == IntPtr.Zero) throw new InvalidOperationException("Speed getter has no native address.");
-        var trampoline = NativeHooks.Create(target, Marshal.GetFunctionPointerForDelegate(Detour));
-        original = Marshal.GetDelegateForFunctionPointer<SpeedGetter>(trampoline);
-        NativeHooks.Enable(target);
-        Entrypoint.Log("PlayerProp.get_Speed hook installed. Waiting for the local hero. F6 toggles; F7 reloads MiniSpeed.cfg.");
-    }
+    internal static void StartKeyMonitor() =>
+        new Thread(MonitorKeys) { IsBackground = true, Name = "MiniSpeed key monitor" }.Start();
 
-    private static int GetSpeed(nint instance, nint method)
+    private static void MonitorKeys()
     {
-        int speed = original(instance, method);
+        Entrypoint.Log("F6/F7 key monitor started; keys are checked whenever the game has focus, independently of speed queries.");
         try
         {
-            // Read only: leave the underlying stat untouched, avoiding compounding.
-            staticValue(heroField, out var hero);
-            if (hero == 0 || instance == 0) return speed;
-            fieldValue(hero, propField, out var localProp);
-            if (instance != localProp) return speed;
-            PollKeys();
-            var result = Settings.Enabled ? (int)Math.Clamp(Math.Round(speed * (double)Settings.Multiplier), int.MinValue, int.MaxValue) : speed;
-            if (lastProp != localProp)
+            while (true)
             {
-                lastProp = localProp;
-                Entrypoint.Log($"Local hero speed hook active: original={speed}, modified={result}.");
+                lock (SpeedLock)
+                {
+                    PollKeys();
+                }
+                Thread.Sleep(15);
             }
-            return result;
         }
-        catch (Exception ex)
-        {
-            if (!reportedError) { reportedError = true; Entrypoint.Log($"Speed hook error; returning original speed: {ex}"); }
-            return speed;
-        }
+        catch (Exception ex) { Entrypoint.Log($"F6/F7 key monitor failed: {ex}"); }
     }
 
     private static void PollKeys()
     {
-        long now = Stopwatch.GetTimestamp();
-        if (now < nextKeyCheck) return;
-        nextKeyCheck = now + Stopwatch.Frequency / 30;
         GetWindowThreadProcessId(GetForegroundWindow(), out var foreground);
         if (foreground != ProcessId) { toggleHeld = reloadHeld = false; return; }
         bool toggle = (GetAsyncKeyState(0x75) & 0x8000) != 0;
         bool reload = (GetAsyncKeyState(0x76) & 0x8000) != 0;
         if (toggle && !toggleHeld)
         {
+            Entrypoint.Log("F6 pressed: toggling movement speed modification.");
             Settings.Enabled = !Settings.Enabled;
-            Entrypoint.Log($"Speed mod {(Settings.Enabled ? "enabled" : "disabled")}.");
+            ReportSettingsChange("F6");
         }
-        if (reload && !reloadHeld) Settings.Reload();
+        if (reload && !reloadHeld)
+        {
+            Entrypoint.Log("F7 pressed: reloading MiniSpeed.cfg.");
+            Settings.Reload();
+            ReportSettingsChange("F7");
+        }
         toggleHeld = toggle;
         reloadHeld = reload;
+    }
+
+    private static void ReportSettingsChange(string key)
+    {
+        Entrypoint.Log($"{key}: base-speed setting now Enabled={Settings.Enabled}, SpeedMultiplier={Settings.Multiplier.ToString(CultureInfo.InvariantCulture)}. Takes effect on the next hero base-speed calculation or movement attribute refresh; this can wait until a scene or speed bonus change.");
     }
 }

@@ -30,6 +30,7 @@ internal static class UpgradeHook
     private static long nextDiscovery;
     private static int reportedLevel = -1;
     private static bool failed;
+    private static int baseCodeOffset, refreshCodeOffset;
 
     internal static void Initialize()
     {
@@ -40,7 +41,7 @@ internal static class UpgradeHook
             using (var stream = File.OpenRead(path))
                 if (Convert.ToHexString(sha.ComputeHash(stream)) != SupportedHash)
                 {
-                    Entrypoint.Log("Weapon upgrade hook disabled: this gameplay DLL version is not supported. Movement mod remains available.");
+                    Entrypoint.Log("Gameplay hooks disabled: unsupported gameplay DLL version (base speed and weapon pricing).");
                     return;
                 }
             var deadline = DateTime.UtcNow.AddMinutes(2);
@@ -55,32 +56,57 @@ internal static class UpgradeHook
 
             // Native fast path: unrelated Python frames jump straight to the
             // original evaluator, without entering managed code after discovery.
-            byte[] code = {
-                0x48,0x8b,0x41,0x20,             // mov rax,[rcx+32] (frame.f_code)
-                0x49,0xbb,0,0,0,0,0,0,0,0,      // mov r11,targetCode
-                0x4d,0x85,0xdb,                 // test r11,r11
-                0x74,0x05,                      // je managed (discover target)
-                0x4c,0x39,0xd8,                 // cmp rax,r11
-                0x75,0x0c,                      // jne original
-                0x48,0xb8,0,0,0,0,0,0,0,0,0xff,0xe0,
-                0x48,0xb8,0,0,0,0,0,0,0,0,0xff,0xe0
-            };
-            filter = VirtualAlloc(0, (nuint)code.Length, 0x3000, 0x40);
-            if (filter == 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
             var threadState = Marshal.ReadIntPtr(module + ThreadStateRva);
             var interpreter = Marshal.ReadIntPtr(threadState, 16);
             var evaluator = Marshal.ReadIntPtr(interpreter, 104);
             if (evaluator != module + EvalRva) throw new InvalidOperationException("Unexpected Python frame evaluator.");
             original = Marshal.GetDelegateForFunctionPointer<Evaluate>(evaluator);
-            BitConverter.GetBytes((long)Marshal.GetFunctionPointerForDelegate(Detour)).CopyTo(code, 26);
-            BitConverter.GetBytes((long)evaluator).CopyTo(code, 38);
+            byte[] code = CreateFilter(evaluator);
+            filter = VirtualAlloc(0, (nuint)code.Length, 0x3000, 0x40);
+            if (filter == 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
             Marshal.Copy(code, 0, filter, code.Length);
             // CPython 3.6 exposes a per-interpreter frame-evaluation callback.
             // Replace that callback rather than patching protected native code.
             Marshal.WriteIntPtr(interpreter, 104, filter);
-            Entrypoint.Log("Weapon upgrade evaluator hook installed; waiting for cl_wardata.CWarData.");
+            Entrypoint.Log("Gameplay evaluator hook installed; waiting for base-speed and weapon-pricing functions.");
         }
-        catch (Exception ex) { Entrypoint.Log($"Weapon upgrade initialization failed: {ex}"); }
+        catch (Exception ex) { Entrypoint.Log($"Gameplay hook initialization failed: {ex}"); }
+    }
+
+    private static byte[] CreateFilter(nint evaluator)
+    {
+        var bytes = new List<byte> { 0x48, 0x8b, 0x41, 0x20 }; // frame.f_code
+        var branches = new List<int>();
+        void LoadTarget()
+        {
+            bytes.AddRange(new byte[] { 0x49, 0xbb }); // mov r11,imm64
+            bytes.AddRange(new byte[8]);
+        }
+        void Branch() { bytes.Add(0x74); branches.Add(bytes.Count); bytes.Add(0); }
+        LoadTarget(); // Discovery/pricing pointer at offset 6.
+        bytes.AddRange(new byte[] { 0x4d, 0x85, 0xdb });
+        Branch();
+        bytes.AddRange(new byte[] { 0x4c, 0x39, 0xd8 });
+        Branch();
+        baseCodeOffset = bytes.Count + 2;
+        LoadTarget();
+        bytes.AddRange(new byte[] { 0x4c, 0x39, 0xd8 });
+        Branch();
+        refreshCodeOffset = bytes.Count + 2;
+        LoadTarget();
+        bytes.AddRange(new byte[] { 0x4c, 0x39, 0xd8 });
+        Branch();
+        void Jump(nint address)
+        {
+            bytes.AddRange(new byte[] { 0x48, 0xb8 });
+            bytes.AddRange(BitConverter.GetBytes((long)address));
+            bytes.AddRange(new byte[] { 0xff, 0xe0 });
+        }
+        Jump(evaluator);
+        int managed = bytes.Count;
+        Jump(Marshal.GetFunctionPointerForDelegate(Detour));
+        foreach (int branch in branches) bytes[branch] = checked((byte)(managed - branch - 1));
+        return bytes.ToArray();
     }
 
     private static nint OnEvaluate(nint frame, int throwFlag)
@@ -98,6 +124,7 @@ internal static class UpgradeHook
                         Discover(); // Called with the Python GIL held.
                     }
                 }
+                if (throwFlag == 0) GameplaySpeed.OnFrame(frame);
                 var pricing = Settings.Upgrades;
                 if (targetCode != 0 && pricing.Enabled && throwFlag == 0 && Marshal.ReadIntPtr(frame, 32) == targetCode)
                 {
@@ -148,7 +175,7 @@ internal static class UpgradeHook
             catch (Exception ex)
             {
                 failed = true;
-                Entrypoint.Log($"Weapon upgrade hook disabled after error; using original prices: {ex}");
+                Entrypoint.Log($"Gameplay hooks disabled after error; using original game behavior: {ex}");
             }
         }
         return original(frame, throwFlag);
@@ -177,6 +204,9 @@ internal static class UpgradeHook
         var builtins = Find(modules, "builtins");
         intType = Find(Marshal.ReadIntPtr(builtins, 16), "int");
         allocateInt = Marshal.GetDelegateForFunctionPointer<Allocate>(Marshal.ReadIntPtr(intType, 304));
+        if (!GameplaySpeed.Initialize(modules, CreateInt, Release)) return;
+        Marshal.WriteIntPtr(filter, baseCodeOffset, GameplaySpeed.BaseCode);
+        Marshal.WriteIntPtr(filter, refreshCodeOffset, GameplaySpeed.RefreshCode);
         Marshal.WriteInt64(code, Marshal.ReadInt64(code) + 1); // Keep code alive until process exit.
         targetCode = code;
         Marshal.WriteIntPtr(filter, 6, code);
@@ -195,7 +225,7 @@ internal static class UpgradeHook
     }
 
     // Read CPython 3.6's compact dictionaries, only while the GIL is held.
-    private static nint Find(nint dictionary, string name)
+    internal static nint Find(nint dictionary, string name)
     {
         if (dictionary == 0) return 0;
         var keys = Marshal.ReadIntPtr(dictionary, 32);
@@ -214,9 +244,9 @@ internal static class UpgradeHook
         return 0;
     }
 
-    private static string TypeName(nint obj) => Marshal.PtrToStringUTF8(Marshal.ReadIntPtr(Marshal.ReadIntPtr(obj, 8), 24)) ?? "";
+    internal static string TypeName(nint obj) => Marshal.PtrToStringUTF8(Marshal.ReadIntPtr(Marshal.ReadIntPtr(obj, 8), 24)) ?? "";
 
-    private static string Text(nint obj)
+    internal static string Text(nint obj)
     {
         long length = Marshal.ReadInt64(obj, 16);
         int state = Marshal.ReadInt32(obj, 32);
@@ -230,6 +260,16 @@ internal static class UpgradeHook
         Marshal.WriteInt64(obj, references);
         if (references == 0)
             Marshal.GetDelegateForFunctionPointer<Destroy>(Marshal.ReadIntPtr(Marshal.ReadIntPtr(obj, 8), 48))(obj);
+    }
+
+    private static nint CreateInt(int value)
+    {
+        var result = allocateInt(intType, value >= 1 << 30 ? 2 : 1);
+        if (result == 0) throw new InvalidOperationException("Cannot allocate base-speed value.");
+        Marshal.WriteInt64(result, 16, value == 0 ? 0 : value >= 1 << 30 ? 2 : 1);
+        Marshal.WriteInt32(result, 24, value & 0x3fffffff);
+        if (value >= 1 << 30) Marshal.WriteInt32(result, 28, value >> 30);
+        return result;
     }
 
     private static void Verify(nint function, nint code)
